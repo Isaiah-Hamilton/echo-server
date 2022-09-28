@@ -5,6 +5,12 @@ This is an overview spec document which details the endpoint and what they expec
 ## Security
 The details of Echo Server's Security are in [auth.md](./auth.md)
 
+## Syncing with Relay
+Unlike in the v1 Push Server spec where every client registration required a request to the Relay
+you just have to set your public url in the cloud app and echo server will receive all notifications
+for your project's id. Echo Server should then gracefully handle them by accepting any notifications
+even if the client hasn't registered and only throw an error when it actually fails to execute a request.
+
 ## Responses
 These are the default responses and are only different if otherwise specified.
 
