@@ -7,7 +7,7 @@ This list contains both supported and potentially planned providers
 - [x] FCM V1 (Google Service Accounts)
 - [x] APNS (Certificate Based)
 - [x] APNS (Token Based)
-- [ ] Web Push
+- [ X ] Web Push
 
 ## Supporting Notifications
 > **Note** Full documentation will be available soon. This is only a brief overview.
@@ -22,7 +22,7 @@ There are 3 options for receiving notifications within your wallet:
 
 When using the hosted platform or self-hosting this implementation you have to provide the instance
 you FCM API Key or APNS certificates and then - following the FCM/APNS docs - add support for that within your
-wallet.
+wallet. TBi2hsA67cgtqoHZ6mWo4U2auBa16g4RB4
 
 You also have to register the device with the instance of Echo Server once when the client_id is initially
 generated. By sending a POST request to `<INSTANCE_URL>/clients` as per the [spec](./spec/spec.md).
