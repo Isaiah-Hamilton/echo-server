@@ -1,1 +1,1 @@
-onepassword_endpoint = "pass.walletconnect.com"
+notification_channels = [{ uid : "NNOynGwVz" }]

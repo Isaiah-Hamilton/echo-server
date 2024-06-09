@@ -1,18 +1,38 @@
 [package]
 name = "echo-server"
-version = "0.6.0"
+version = "0.41.5"
 edition = "2021"
 authors = [
     "Harry Bairstow <harry@walletconnect.com>"
 ]
 build = "build.rs"
+resolver = "2"
+
+[features]
+full = ["functional_tests", "multitenant", "analytics", "geoblock", "cloud", "apns_tests", "fcm_tests", "fcmv1_tests"]
+# Used to enable functional tests
+functional_tests = []
+# Multi-tenancy mode
+multitenant = []
+# Enable analytics
+analytics = []
+# Geoblocking
+geoblock = []
+# Enable cloud app validations
+cloud = []
+apns_tests = []
+fcm_tests = []
+fcmv1_tests = []
 
 [dependencies]
+wc = { git = "https://github.com/WalletConnect/utils-rs.git", tag = "v0.11.1", features = ["full"] }
+
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.6.0-rc.2", features = ["json"] }
+axum = { version = "0.7.5", features = ["json", "multipart", "tokio"] }
+axum-client-ip = "0.5.1"
 tower = "0.4.13"
-tower-http = { version = "0.3.4", features = ["trace"] }
-hyper = "0.14"
+tower-http = { version = "0.5.2", features = ["trace", "cors", "request-id", "propagate-header", "catch-panic", "util"] }
+hyper = "1.2.0"
 
 # Database
 sqlx = { version = "0.6", features = ["runtime-tokio-native-tls", "postgres", "json", "chrono", "macros"] }
@@ -22,36 +42,68 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Env Vars
-dotenv = "0.15.0"
+dotenv = "0.15"
 envy = "0.4"
 
 # Build-time info
-build-info = "0.0.27"
+build-info = "0.0"
 
-# Tracing and Telemetry
-opentelemetry = { version = "0.17", features = ["trace", "metrics", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.10", features = ["metrics", "trace"] }
+# Logging
 tracing = "0.1"
-tracing-subscriber = "0.3"
-tracing-opentelemetry = "0.17"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "parking_lot"] }
+tracing-appender = "0.2"
+tracing-opentelemetry = "0.18"
+atty = "0.2"
 
 # Push
-a2 = { git = "https://github.com/walletconnect/a2.git", branch = "v0.7" }
+a2 = { version = "0.10.0", features = ["tracing", "openssl"] }
 fcm = "0.9"
+# fcm_v1 = { git = "https://github.com/rj76/fcm-rust.git", package = "fcm" }
+fcm_v1 = { git = "https://github.com/WalletConnect/fcm-rust.git", package = "fcm", branch = "feat/key-not-from-file", default-features = false, features = ["native-tls"] } # TODO use above version once released
 
 # Signature validation
-ed25519-dalek = "1.0"
+ed25519-dalek = "2.1.1"
+
+# JWT Authentication
+relay_rpc = { git = "https://github.com/WalletConnect/WalletConnectRust.git", tag = "v0.29.4" }
+jsonwebtoken = "8.1"
+data-encoding = "2.3"
+
+# Analytics
+aws-config = "1.1.9"
+aws-sdk-s3 = "1.21.0"
+parquet = { git = "https://github.com/WalletConnect/arrow-rs.git", rev = "99a1cc3", default-features = false, features = ["flate2"] }
+parquet_derive = { git = "https://github.com/WalletConnect/arrow-rs.git", rev = "99a1cc3" }
 
 # Misc
-reqwest = "0.11"
+reqwest = { version = "0.12.4", features = ["multipart", "json"] }
 async-trait = "0.1"
 thiserror = "1.0"
 hex = "0.4"
-base64 = "0.13.0"
-chrono = "0.4"
+base64 = "0.21"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.2", features = ["v4"] }
+is-variant-derive = { path = "crates/is-variant-derive" }
+once_cell = "1.15"
+pnet_datalink = "0.31"
+ipnet = "2.5"
+tap = "1.0.1"
+wiremock = "0.6.0"
+moka = { version = "0.12", features = ["future"] }
 
 [dev-dependencies]
-serial_test = "0.9"
+serial_test = "1.0"
+test-context = "0.1"
+futures-util = "0.3"
+random-string = "1.0"
+rand = "0.8"
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 
 [build-dependencies]
 build-info-build = "0.0"
+
+# [patch.'https://github.com/WalletConnect/fcm-rust.git']
+# fcm = { path = "../fcm-rust" }
+
+# [patch.'https://github.com/WalletConnect/gauth-rs.git']
+# gauth = { path = "../gauth-rs" }

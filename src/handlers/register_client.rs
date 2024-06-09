@@ -1,28 +1,70 @@
-use crate::error::Error::{ClientAlreadyRegistered, EmptyField, IncludedTenantIdWhenNotNeeded, ProviderNotAvailable};
-use crate::error::Result;
-use crate::handlers::Response;
-use crate::state::{AppState, State};
-use crate::stores::client::Client;
-use crate::stores::StoreError;
-use axum::extract::{Json, Path, State as StateExtractor};
-use serde::Deserialize;
-use std::sync::Arc;
+#[cfg(feature = "analytics")]
+use {crate::analytics::client_info::ClientInfo, axum_client_ip::SecureClientIp};
+use {
+    crate::{
+        error::{
+            Error::{EmptyField, InvalidAuthentication, ProviderNotAvailable},
+            Result,
+        },
+        handlers::{authenticate_client, Response, DECENTRALIZED_IDENTIFIER_PREFIX},
+        increment_counter,
+        log::prelude::*,
+        state::AppState,
+        stores::client::Client,
+    },
+    axum::{
+        extract::{Json, Path, State as StateExtractor},
+        http::HeaderMap,
+    },
+    relay_rpc::domain::ClientId,
+    serde::{Deserialize, Serialize},
+    std::sync::Arc,
+    tracing::instrument,
+};
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct RegisterBody {
-    pub client_id: String,
+    pub client_id: ClientId,
     #[serde(rename = "type")]
     pub push_type: String,
     pub token: String,
+    pub always_raw: Option<bool>,
 }
 
+#[instrument(skip_all, name = "register_client_handler")]
 pub async fn handler(
+    #[cfg(feature = "analytics")] SecureClientIp(client_ip): SecureClientIp,
     Path(tenant_id): Path<String>,
     StateExtractor(state): StateExtractor<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<RegisterBody>,
 ) -> Result<Response> {
-    if state.config.default_tenant_id != tenant_id && !state.is_multitenant() {
-        return Err(IncludedTenantIdWhenNotNeeded)
+    if !authenticate_client(headers, &state.config.public_url, |client_id| {
+        if let Some(client_id) = client_id {
+            debug!(
+                %tenant_id,
+                requested_client_id = %body.client_id,
+                token_client_id = %client_id,
+                "client_id authentication checking"
+            );
+            client_id == body.client_id
+        } else {
+            debug!(
+                %tenant_id,
+                requested_client_id = %body.client_id,
+                token_client_id = "unknown",
+                "client_id verification failed: missing client_id"
+            );
+            false
+        }
+    })? {
+        debug!(
+            %tenant_id,
+            requested_client_id = %body.client_id,
+            token_client_id = "unknown",
+            "client_id verification failed: invalid client_id"
+        );
+        return Err(InvalidAuthentication);
     }
 
     let push_type = body.push_type.as_str().try_into()?;
@@ -36,39 +78,65 @@ pub async fn handler(
         return Err(EmptyField("token".to_string()));
     }
 
-    let exists = match state
-        .client_store
-        .get_client(&tenant_id, &body.client_id)
-        .await
-    {
-        Ok(_) => true,
-        Err(e) => match e {
-            StoreError::Database(db_error) => {
-                return Err(db_error.into());
-            }
-            StoreError::NotFound(_, _) => false,
-        },
-    };
+    let client_id = body
+        .client_id
+        .as_ref()
+        .trim_start_matches(DECENTRALIZED_IDENTIFIER_PREFIX)
+        .to_owned();
 
-    if exists {
-        return Err(ClientAlreadyRegistered);
-    }
-
+    let always_raw = body.always_raw.unwrap_or(false);
     state
         .client_store
         .create_client(
             &tenant_id,
-            &body.client_id,
+            &client_id,
             Client {
+                tenant_id: tenant_id.clone(),
                 push_type,
                 token: body.token,
+                always_raw,
             },
+            state.metrics.as_ref(),
         )
         .await?;
 
-    if let Some(metrics) = &state.metrics {
-        metrics.registered_webhooks.add(1, &[]);
-    }
+    debug!(
+        %tenant_id, %client_id, %push_type, "registered client"
+    );
+
+    increment_counter!(state.metrics, registered_clients);
+
+    // Analytics
+    #[cfg(feature = "analytics")]
+    tokio::spawn(async move {
+        if let Some(analytics) = &state.analytics {
+            let (country, continent, region) = analytics
+                .lookup_geo_data(client_ip)
+                .map_or((None, None, None), |geo| {
+                    (geo.country, geo.continent, geo.region)
+                });
+
+            debug!(
+                %tenant_id,
+                %client_id,
+                ip = %client_ip,
+                "loaded geo data"
+            );
+
+            let msg = ClientInfo {
+                region: region.map(|r| Arc::from(r.join(", "))),
+                country,
+                continent,
+                project_id: tenant_id.into(),
+                client_id: client_id.into(),
+                push_provider: body.push_type.as_str().into(),
+                always_raw,
+                registered_at: wc::analytics::time::now(),
+            };
+
+            analytics.client(msg);
+        }
+    });
 
     Ok(Response::default())
 }

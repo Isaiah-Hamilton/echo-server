@@ -1,0 +1,31 @@
+version: '3.9'
+services:
+  postgres:
+    image: postgres
+    environment:
+      - POSTGRES_PASSWORD=root
+    ports:
+      - "5432:5432"
+
+  postgres-tenant:
+    image: postgres
+    environment:
+      - POSTGRES_PASSWORD=root
+    ports:
+      - "5433:5432"
+
+  echo-server:
+      build: .
+      depends_on:
+        - jaeger
+        - postgres
+        - postgres-tenant
+      ports:
+        - "3000:3000"
+        - "3002:3002"
+      environment:
+        - PORT=3000
+        - LOG_LEVEL=info,echo-server=info
+        - DATABASE_URL=postgres://postgres:root@postgres:5432/postgres
+        - TENANT_DATABASE_URL=postgres://postgres:root@postgres-tenant:5433/postgres
+        - TELEMETRY_PROMETHEUS_PORT=3002

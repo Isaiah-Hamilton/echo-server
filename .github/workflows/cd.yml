@@ -1,12 +1,35 @@
 name: cd
 on:
-  push:
-    branches:
-      - "main"
-    paths:
-      - "terraform/**"
-  release:
-    types: ["published"]
+  workflow_dispatch:
+    inputs:
+      deploy_to_staging:
+        description: "Deploy to staging"
+        type: boolean
+        required: true
+        default: true
+      deploy_to_prod:
+        description: "Deploy to production"
+        type: boolean
+        required: true
+        default: false
+      image_tag:
+          description: "App image tag. Default: latest release"
+          type: string
+          required: false
+          default: ""
+  workflow_call:
+    inputs:
+      deploy_to_staging:
+        type: boolean
+        required: true
+        default: true
+      deploy_to_prod:
+        type: boolean
+        required: false
+        default: false
+      image_tag:
+        type: string
+        required: true
 
 concurrency:
   # Only allow for one action to run at once, queue any others
@@ -15,44 +38,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  get-version:
+  deploy-infra-staging:
+    if: ${{ inputs.deploy_to_staging }}
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.clean_version.outputs.version }}
+    environment:
+      name: staging
+      url: https://staging.echo.walletconnect.com/health
     steps:
-      - id: latest_release
-        uses: pozetroninc/github-action-get-latest-release@master
-        if: github.event_name != 'release'
+      - name: Checkout
+        uses: actions/checkout@v3
         with:
-          repository: ${{ github.repository }}
-          excludes: draft
-
-      - id: get
-        uses: actions/github-script@v6
-        env:
-          LATEST_TAG: ${{ steps.latest_release.outputs.release }}
-        with:
-          result-encoding: string
-          script: |
-            if (context.eventName == "release") {
-              return context.payload.release.tag_name
-            } else {
-              return process.env.LATEST_TAG
-            }
-
-      - id: clean_version
-        run: |
-          version=$(echo "${{ steps.get.outputs.result }}" | sed 's/v//g')
-          echo "version=$version" >> $GITHUB_OUTPUT
-
-  build-container:
-    runs-on: ubuntu-latest
-    needs:
-      - get-version
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -61,103 +58,117 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-central-1
 
-      # Authenticate with ECR
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
-
-      - name: Login to GHCR
-        id: login-ghcr
-        run: |
-          echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u USERNAME --password-stdin
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v4
-        if: github.event_name == 'release'
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
         with:
-          images: |
-            ${{ steps.login-ecr.outputs.registry }}/echo-server
-            ghcr.io/walletconnect/echo-server
-            walletconnect/echo-server,enable=false
-          flavor: |
-            latest=auto
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=${{ needs.get-version.outputs.version }}
-      # Setup Buildkit
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-        if: github.event_name == 'release'
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
 
-      - name: Build, tag, and push image to Amazon ECR
-        uses: docker/build-push-action@v3
-        if: github.event_name == 'release'
+      - name: Get Grafana details
+        id: grafana-get-details
+        uses: WalletConnect/actions/aws/grafana/get-details/@1.0.3
+
+      - name: Get Grafana key
+        id: grafana-get-key
+        uses: WalletConnect/actions/aws/grafana/get-key/@1.0.3
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          key-prefix: ${{ github.event.repository.name }}
+          workspace-id: ${{ steps.grafana-get-details.outputs.workspace-id }}
 
-  deploy-infra-staging:
-    runs-on: ubuntu-latest
-    environment:
-      name: staging
-      url: https://staging.echo.walletconnect.com/health
-    needs:
-      - get-version
-      - build-container
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: Init Terraform
+        id: tf-init
+        uses: WalletConnect/actions/terraform/init/@1.0.3
+        with:
+          environment: "staging"
 
-      - id: deploy-staging
-        uses: WalletConnect/actions/actions/deploy-terraform/@master
+      - name: Deploy Terraform to Staging
+        id: tf-apply
+        uses: WalletConnect/actions/terraform/apply/@1.0.3
         env:
-          TF_VAR_onepassword_vault_id: ${{ secrets.ONEPASSWORD_VAULT_ID }}
-          TF_VAR_image_version: ${{ needs.get-version.outputs.version }}
+          TF_VAR_grafana_auth: ${{ steps.grafana-get-key.outputs.key }}
+          TF_VAR_grafana_endpoint: ${{ steps.grafana-get-details.outputs.endpoint }}
+          TF_VAR_jwt_secret: ${{ secrets.STAGING_JWT_SECRET }}
+          TF_VAR_image_version: ${{ inputs.image_tag }}
+          TF_VAR_relay_public_key: ${{ secrets.RELAY_PUBLIC_KEY }}
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: eu-central-1
-          environment: staging
-          onepassword-api-key: ${{ secrets.OP_CONNECT_TOKEN }}
-          app-name: ${{ github.event.repository.name }}
+          environment: "staging"
 
-  # TODO: Run integration test suite here
+      - name: Delete Grafana key
+        id: grafana-delete-key
+        uses: WalletConnect/actions/aws/grafana/delete-key/@1.0.3
+        if: ${{ success() || failure() || cancelled() }} # don't use always() since it creates non-cancellable jobs
+        with:
+          key-name: ${{ steps.grafana-get-key.outputs.key-name }}
+          workspace-id: ${{ steps.grafana-get-details.outputs.workspace-id }}
 
-  check-staging-health:
-    needs:
-      - deploy-infra-staging
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check Staging Up
-        run: curl --fail --connect-timeout 15 --retry 5 --retry-delay 5 https://staging.echo.walletconnect.com/health
+  validate_staging:
+    if: ${{ inputs.deploy_to_staging }}
+    needs: [deploy-infra-staging]
+    uses: ./.github/workflows/validate.yml
+    with:
+      environment: 'staging'
+    secrets:
+      TEST_TENANT_ID: ${{ secrets.TEST_TENANT_ID }}
 
   deploy-infra-prod:
+    if: ${{ inputs.deploy_to_prod }}
     runs-on: ubuntu-latest
     environment:
       name: prod
       url: https://echo.walletconnect.com/health
     needs:
-      - get-version
-      - check-staging-health
+      - validate_staging
     steps:
       - name: Checkout
         uses: actions/checkout@v3
+        with:
+          submodules: recursive
+          token: ${{ secrets.RELEASE_PAT }}
 
-      - id: deploy-staging
-        uses: WalletConnect/actions/actions/deploy-terraform/@master
-        env:
-          TF_VAR_onepassword_vault_id: ${{ secrets.ONEPASSWORD_VAULT_ID }}
-          TF_VAR_image_version: ${{ needs.get-version.outputs.version }}
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-central-1
-          environment: prod
-          onepassword-api-key: ${{ secrets.OP_CONNECT_TOKEN }}
-          app-name: ${{ github.event.repository.name }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Get Grafana details
+        id: grafana-get-details
+        uses: WalletConnect/actions/aws/grafana/get-details/@1.0.3
+
+      - name: Get Grafana key
+        id: grafana-get-key
+        uses: WalletConnect/actions/aws/grafana/get-key/@1.0.3
+        with:
+          key-prefix: ${{ github.event.repository.name }}
+          workspace-id: ${{ steps.grafana-get-details.outputs.workspace-id }}
+
+      - name: Init Terraform
+        id: tf-init
+        uses: WalletConnect/actions/terraform/init/@1.0.3
+        with:
+          environment: "prod"
+
+      - name: Deploy Terraform to Production
+        id: tf-apply
+        uses: WalletConnect/actions/terraform/apply/@1.0.3
+        env:
+          TF_VAR_grafana_auth: ${{ steps.grafana-get-key.outputs.key }}
+          TF_VAR_grafana_endpoint: ${{ steps.grafana-get-details.outputs.endpoint }}
+          TF_VAR_jwt_secret: ${{ secrets.PROD_JWT_SECRET }}
+          TF_VAR_image_version: ${{ inputs.image_tag }}
+          TF_VAR_relay_public_key: ${{ secrets.RELAY_PUBLIC_KEY }}
+        with:
+          environment: "prod"
+
+      - name: Delete Grafana key
+        id: grafana-delete-key
+        uses: WalletConnect/actions/aws/grafana/delete-key/@1.0.3
+        if: ${{ success() || failure() || cancelled() }} # don't use always() since it creates non-cancellable jobs
+        with:
+          key-name: ${{ steps.grafana-get-key.outputs.key-name }}
+          workspace-id: ${{ steps.grafana-get-details.outputs.workspace-id }}

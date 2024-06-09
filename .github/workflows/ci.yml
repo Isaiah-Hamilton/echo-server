@@ -3,6 +3,7 @@ name: ci
 on:
   pull_request:
     paths-ignore:
+      - ".github/**"
       - "spec/**"
       - "terraform/**"
       - "*.md"
@@ -11,11 +12,15 @@ on:
   push:
     branches:
       - "main"
-    paths:
+    paths-ignore:
+      - ".github/**"
       - "spec/**"
       - "terraform/**"
       - "*.md"
       - "LICENSE"
+
+  workflow_call:
+
 
 concurrency:
   # Support push/pr as event types with different behaviors each:
@@ -27,29 +32,67 @@ concurrency:
 
 jobs:
   tasks:
-    name: "[${{ matrix.os }}/rust-${{matrix.rust}}] ${{ matrix.cargo.name }}"
-    runs-on: "${{ matrix.os }}"
+    name: "[${{ matrix.os }}/rust-${{matrix.cargo.rustc}}] ${{ matrix.cargo.name }}"
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres-tenant:
+        image: postgres
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     strategy:
       fail-fast: false
       matrix:
         os:
           - ubuntu-latest
-        rust:
-          - stable
-          - nightly
         cargo:
-          - name: "Clippy"
+          - name: "Clippy default features"
             cmd: clippy
-            args: -- -D clippy::all
+            args: --tests -- -D warnings
             cache: {}
+            rustc: stable
+          - name: "Clippy multitenant feature, no analytics feature"
+            cmd: clippy
+            args: --features=multitenant --tests -- -D warnings
+            cache: {}
+            rustc: stable
+          - name: "Clippy all features"
+            cmd: clippy
+            args: --all-features --all-targets -- -D warnings
+            cache: {}
+            rustc: stable
           - name: "Formatting"
             cmd: fmt
             args: -- --check
             cache: {}
+            rustc: nightly
           - name: "Unit Tests"
             cmd: test
-            args: --all-features
+            args: --features multitenant,analytics,geoblock,functional_tests,apns_tests,fcm_tests,fcmv1_tests
             cache: { sharedKey: "tests" }
+            rustc: stable
+          - name: "Single-tenant functional tests"
+            cmd: test
+            args: --features functional_tests
+            cache: { sharedKey: "tests" }
+            rustc: stable
         include:
           - os: ubuntu-latest
             sccache-path: /home/runner/.cache/sccache
@@ -58,10 +101,18 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_CACHE_SIZE: 1G
       SCCACHE_DIR: ${{ matrix.sccache-path }}
+      # Unit test environment variables dependencies
+      DATABASE_URL: postgres://postgres:root@localhost:5432/postgres
+      TENANT_DATABASE_URL: postgres://postgres:root@localhost:5433/postgres
+      RELAY_PUBLIC_KEY: ${{ secrets.RELAY_PUBLIC_KEY }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
     steps:
       # Checkout code
       - name: "Git checkout"
         uses: actions/checkout@v2
+        with:
+          submodules: recursive
+          token: ${{ secrets.RELEASE_PAT }}
 
       # Install sccache
       - name: "Install sccache"
@@ -79,7 +130,7 @@ jobs:
       - name: "Install Rust ${{ matrix.rust }}"
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: ${{ matrix.cargo.rustc }}
           profile: minimal
           override: true
           components: rustfmt, clippy
@@ -105,11 +156,27 @@ jobs:
           sccache --stop-server || true
           sccache --start-server
 
+      - name: Install lld and llvm
+        run: sudo apt-get install -y lld llvm
+
+      # TODO: Remove once https://crates.io/crates/opentelemetry-otlp is updated
+      # and no longer has a build requirement of `protoc``.
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: "Task ${{ matrix.cargo.name }}"
         uses: actions-rs/cargo@v1
         with:
           command: ${{ matrix.cargo.cmd }}
           args: ${{ matrix.cargo.args }}
+        env:
+          ECHO_TEST_FCM_KEY: ${{ secrets.ECHO_TEST_FCM_KEY }}
+          ECHO_TEST_FCM_V1_CREDENTIALS: ${{ secrets.ECHO_TEST_FCM_V1_CREDENTIALS }}
+          ECHO_TEST_APNS_P8_KEY_ID: ${{ secrets.ECHO_TEST_APNS_P8_KEY_ID }}
+          ECHO_TEST_APNS_P8_TEAM_ID: ${{ secrets.ECHO_TEST_APNS_P8_TEAM_ID }}
+          ECHO_TEST_APNS_P8_PEM: ${{ secrets.ECHO_TEST_APNS_P8_PEM }}
 
       - name: "Print sccache stats"
         run: sccache --show-stats

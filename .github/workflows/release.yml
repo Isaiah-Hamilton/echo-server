@@ -2,60 +2,132 @@ name: release
 
 on:
   workflow_dispatch:
+    inputs:
+      deploy_to_staging:
+        description: "Deploy to staging"
+        type: boolean
+        required: true
+        default: true
+      deploy_to_prod:
+        description: "Deploy to production"
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.RELEASE_PAT }}
 
-      - name: "Cocogitto release"
+      - name: Install lld and llvm
+        run: sudo apt-get install -y lld llvm
+
+      # TODO: Remove once https://crates.io/crates/opentelemetry-otlp is updated
+      # and no longer has a build requirement of `protoc``.
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update and commit the release version
         id: release
-        uses: cocogitto/cocogitto-action@v3
+        uses: WalletConnect/actions/github/update-rust-version/@2.1.5
         with:
-          check: true
-          check-latest-tag-only: true
-          release: true
-          git-user: 'github-actions[bot]'
-          git-user-email: "github-actions[bot]@users.noreply.github.com"
+          token: ${{ secrets.RELEASE_PAT }}
 
-      - name: "Update version in Cargo.toml"
-        shell: bash
+  build-container:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        file: [Dockerfile, slim.Dockerfile]
+    needs:
+      - release
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      # Ensure that we get the new version from updated Cargo.toml
+      - name: Move to HEAD
         run: |
-          version=$(echo "${{ steps.release.outputs.version }}" | sed 's/v//g')
-
-          sed "s/^version = \".*\"\$/version = \"$version\"/" ./Cargo.toml > /tmp/cargo.toml
-          mv /tmp/cargo.toml ./Cargo.toml
-
-      - name: "Commit version bump"
-        uses: stefanzweifel/git-auto-commit-action@v4
+          git reset --hard HEAD
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
         with:
-          commit_message: "chore: Bump version for release"
-          file_pattern: "Cargo.toml Cargo.lock"
-          commit_user_name: "github-actions[bot]"
-          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
 
-      - name: "Install Rust toolchain (stable)"
-        uses: actions-rs/toolchain@v1
+      # Authenticate with ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
         with:
-          toolchain: stable
-          profile: minimal
-          default: true
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: false
 
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
+      - name: Set tag suffix
+        id: suffix
+        run: |
+          if [[ "${{ matrix.file }}" == *.* ]]; then
+            echo "::set-output name=suffix:::$(echo "${{ matrix.file }}" | cut -d'.' -f1)"
+          else
+            echo "::set-output name=suffix::"
+          fi
 
-      - name: "Generate Changelog"
-        run: cog changelog --at ${{ steps.release.outputs.version }} -t full_hash > GITHUB_CHANGELOG.md
-
-      - name: "Update Github release notes"
-        uses: softprops/action-gh-release@v1
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v4
         with:
-          body_path: GITHUB_CHANGELOG.md
-          tag_name: ${{ steps.release.outputs.version }}
-          token: ${{ secrets.PAT }}
+          images: |
+            ${{ steps.login-ecr.outputs.registry }}/echo-server
+            ghcr.io/${{ github.repository }}
+            walletconnect/echo-server,enable=false
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}},suffix=${{ steps.suffix.outputs.suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=${{ steps.suffix.outputs.suffix }}
+            type=raw,value=${{ needs.release.outputs.version }},suffix=${{ steps.suffix.outputs.suffix }}
+
+      # Setup Buildkit
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build, tag, and push image
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  run-cd:
+    needs:
+      - release
+      - build-container
+    # call the cd.yml file with image tag from the new release
+    uses: ./.github/workflows/cd.yml
+    with:
+      image_tag: ${{ needs.release.outputs.version }}
+      deploy_to_staging: ${{ inputs.deploy_to_staging }}
+      deploy_to_prod: ${{ inputs.deploy_to_prod }}
+    secrets: inherit

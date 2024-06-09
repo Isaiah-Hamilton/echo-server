@@ -17,15 +17,36 @@ variable "grafana_endpoint" {
   type = string
 }
 
-variable "onepassword_endpoint" {
-  type = string
-}
-
-variable "onepassword_vault_id" {
+variable "grafana_auth" {
   type = string
 }
 
 variable "image_version" {
   type    = string
-  default = "latest"
+  default = ""
+}
+
+variable "geoip_db_key" {
+  description = "The key to the GeoIP database"
+  type        = string
+  default     = "GeoLite2-City.mmdb"
+}
+
+variable "jwt_secret" {
+  type      = string
+  sensitive = true
+}
+
+variable "relay_public_key" {
+  type      = string
+  sensitive = true
+}
+
+#-------------------------------------------------------------------------------
+# Alerting / Monitoring
+
+variable "notification_channels" {
+  description = "The notification channels to send alerts to"
+  type        = list(any)
+  default     = []
 }

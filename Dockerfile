@@ -1,22 +1,9 @@
 ################################################################################
 #
-# Build args
-#
-################################################################################
-ARG                 base="rust:buster"
-ARG                 runtime="debian:buster-slim"
-ARG                 bin="echo-server"
-ARG                 version="unknown"
-ARG                 sha="unknown"
-ARG                 maintainer="WalletConnect"
-ARG                 release=""
-
-################################################################################
-#
 # Install cargo-chef
 #
 ################################################################################
-FROM                ${base} AS chef
+FROM               rust:buster AS chef
 
 WORKDIR             /app
 RUN                 cargo install cargo-chef
@@ -31,6 +18,7 @@ FROM                chef AS plan
 WORKDIR             /app
 COPY                Cargo.lock Cargo.toml ./
 COPY                src ./src
+COPY                crates ./crates
 RUN                 cargo chef prepare --recipe-path recipe.json
 
 ################################################################################
@@ -40,41 +28,47 @@ RUN                 cargo chef prepare --recipe-path recipe.json
 ################################################################################
 FROM                chef AS build
 
-ARG                 release
-ENV                 RELEASE=${release:+--release}
+ENV                 TINI_VERSION v0.19.0
+
+# This is a build requirement of `opentelemetry-otlp`. Once the new version
+# is rolled out, which no longer requires the `protoc`, we'll be able to
+# get rid of this.
+RUN                 apt-get update \
+  && apt-get install -y --no-install-recommends protobuf-compiler
+
+RUN                 apt-get update \
+  && apt-get install -y --no-install-recommends lld llvm
 
 WORKDIR             /app
-# Cache dependancies
+# Cache dependencies
 COPY --from=plan    /app/recipe.json recipe.json
-RUN                 cargo chef cook --recipe-path recipe.json ${RELEASE}
+COPY --from=plan    /app/crates ./crates
+
+# Install init to be used in runtime container
+ADD                 https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-static /tini
+RUN                 chmod +x /tini
+
+RUN                 cargo chef cook --recipe-path recipe.json --release --features multitenant,analytics,cloud
 # Build the local binary
 COPY                . .
-RUN                 cargo build --bin echo-server ${RELEASE}
+RUN                 cargo build --bin echo-server --release --features multitenant,analytics,cloud
 
 ################################################################################
 #
 # Runtime image
 #
 ################################################################################
-FROM                ${runtime} AS runtime
+FROM               debian:buster-slim AS runtime
 
-ARG                 bin
-ARG                 version
-ARG                 sha
-ARG                 maintainer
-ARG                 release
-ARG                 binpath=${release:+release}
-
-LABEL               version=${version}
-LABEL               sha=${sha}
-LABEL               maintainer=${maintainer}
+COPY --from=build   /tini /tini
 
 WORKDIR             /app
-COPY --from=build   /app/target/${binpath:-debug}/echo-server /usr/local/bin/echo-server
+COPY --from=build   /app/target/release/echo-server /usr/local/bin/echo-server
 RUN                 apt-get update \
                         && apt-get install -y --no-install-recommends ca-certificates libssl-dev \
                         && apt-get clean \
                         && rm -rf /var/lib/apt/lists/*
 
 USER                1001:1001
-ENTRYPOINT          ["/usr/local/bin/echo-server"]
+ENTRYPOINT          ["/tini", "--"]
+CMD                 ["/usr/local/bin/echo-server"]
